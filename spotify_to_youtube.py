@@ -16,20 +16,25 @@ import time
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from ytmusicapi import YTMusic
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import argparse
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+try:
+    from patchright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+except ImportError:
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+from datetime import datetime
 
 
 class SpotifyToYouTubeMusic:
-    def __init__(self, config_file='config.json'):
+    def __init__(self, config_file='config.json', skip_youtube_auth=False):
         """Initialize the Spotify and YouTube Music clients."""
         self.spotify = None
         self.ytmusic = None
         self.config = self.load_config(config_file)
         self.setup_spotify()
-        self.setup_youtube_music()
+        if not skip_youtube_auth:
+            self.setup_youtube_music()
 
     def load_config(self, config_file: str) -> Dict:
         """
@@ -129,11 +134,13 @@ class SpotifyToYouTubeMusic:
         if not headers_file:
             print("\nERROR: YouTube Music authentication file not found!")
             print("\nTo set up YouTube Music authentication, choose one of these methods:")
-            print("\nOption 1 - OAuth (requires Google Cloud project):")
+            print("\nOption 1 - Automated setup (easiest):")
+            print("  Run: python3 spotify_to_youtube.py --setup-youtube")
+            print("\nOption 2 - OAuth (requires Google Cloud project):")
             print("  1. Run: ytmusicapi oauth")
             print("  2. Follow instructions to authenticate")
             print("  3. This creates 'oauth.json'")
-            print("\nOption 2 - Browser headers (recommended, no setup needed):")
+            print("\nOption 3 - Manual browser headers:")
             print("  1. Run: ytmusicapi browser")
             print("  2. Follow instructions to extract headers from your browser")
             print("  3. This creates 'browser.json'")
@@ -148,6 +155,265 @@ class SpotifyToYouTubeMusic:
         except Exception as e:
             print(f"ERROR: Failed to authenticate with YouTube Music: {e}")
             sys.exit(1)
+
+    def setup_youtube_auth_interactive(self, output_file: str = 'browser.json'):
+        """
+        Automatically extract YouTube Music authentication headers using browser.
+
+        Args:
+            output_file: Path to save the authentication headers
+        """
+        print(f"\n{'='*60}")
+        print("YouTube Music Authentication Setup")
+        print(f"{'='*60}\n")
+
+        print("This will open a browser window to YouTube Music.")
+        print("Please log in to your YouTube/Google account when prompted.\n")
+        print("Press Enter to continue...")
+        input()
+
+        captured_headers = None
+        user_data_dir = os.path.join(os.getcwd(), '.browser_profile')
+
+        try:
+            with sync_playwright() as p:
+                print("\nLaunching browser with stealth settings...")
+
+                # Launch with arguments to avoid detection
+                browser = p.chromium.launch(
+                    headless=False,
+                    args=[
+                        '--disable-blink-features=AutomationControlled',
+                        '--disable-dev-shm-usage',
+                        '--no-sandbox',
+                        '--disable-web-security',
+                        '--disable-features=IsolateOrigins,site-per-process',
+                        '--disable-setuid-sandbox',
+                        '--disable-accelerated-2d-canvas',
+                        '--disable-gpu'
+                    ]
+                )
+
+                # Create context with persistent storage and realistic settings
+                context = browser.new_context(
+                    user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                    viewport={'width': 1920, 'height': 1080},
+                    locale='en-US',
+                    timezone_id='America/New_York',
+                    permissions=['geolocation'],
+                    storage_state=None if not os.path.exists(user_data_dir + '/state.json') else user_data_dir + '/state.json'
+                )
+
+                # Add stealth scripts to avoid detection
+                context.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+
+                    window.navigator.chrome = {
+                        runtime: {}
+                    };
+
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [1, 2, 3, 4, 5]
+                    });
+
+                    Object.defineProperty(navigator, 'languages', {
+                        get: () => ['en-US', 'en']
+                    });
+                """)
+
+                page = context.new_page()
+
+                # Intercept requests to capture headers
+                request_count = 0
+                post_count = 0
+                def handle_request(request):
+                    nonlocal captured_headers, request_count, post_count
+                    url = request.url
+
+                    # Log all music.youtube.com requests for debugging
+                    if 'music.youtube.com' in url:
+                        request_count += 1
+                        if request_count <= 5:  # Show first 5 requests
+                            print(f"  [Request {request_count}] {request.method} {url[:80]}...")
+
+                    # Look for authenticated POST requests to YouTube Music API
+                    if 'music.youtube.com' in url and request.method == 'POST':
+                        post_count += 1
+                        headers = request.headers
+
+                        # Debug: Show POST request details
+                        if post_count <= 3 and captured_headers is None:
+                            print(f"\n  [POST {post_count}] URL: {url[:70]}...")
+                            print(f"  [POST {post_count}] Headers present: {', '.join(sorted(headers.keys())[:10])}")
+
+                            # Check for authentication headers
+                            has_cookie = any(k.lower() == 'cookie' for k in headers.keys())
+                            has_auth = any(k.lower() == 'authorization' for k in headers.keys())
+                            print(f"  [POST {post_count}] Has cookie: {has_cookie}, Has authorization: {has_auth}")
+
+                        # Check if this request has authentication (cookie OR authorization header)
+                        has_auth = False
+                        for key in headers.keys():
+                            if key.lower() in ['cookie', 'authorization']:
+                                has_auth = True
+                                break
+
+                        # Capture headers from youtubei API requests that have authentication
+                        if has_auth and 'youtubei' in url and captured_headers is None:
+                            print(f"\n✓ Captured authentication headers from: {url[:60]}...")
+                            captured_headers = dict(headers)
+
+                page.on('request', handle_request)
+
+                print("Opening YouTube Music...")
+                page.goto('https://music.youtube.com', wait_until='domcontentloaded', timeout=30000)
+
+                print("Waiting for page to load...")
+                time.sleep(3)
+
+                if not captured_headers:
+                    print("\nAttempting to trigger API calls by navigating to Library...")
+                    try:
+                        # Try to navigate to Library to trigger API calls
+                        page.goto('https://music.youtube.com/library', wait_until='domcontentloaded', timeout=15000)
+                        time.sleep(3)
+                    except Exception as e:
+                        print(f"Note: Could not navigate to Library automatically: {e}")
+
+                if not captured_headers:
+                    print("\n" + "="*60)
+                    print("Manual steps needed:")
+                    print("="*60)
+                    print("In the browser window:")
+                    print("1. Make sure you're logged in to your Google/YouTube account")
+                    print("2. Click on 'Library' in the left sidebar")
+                    print("3. Or click on any playlist")
+                    print("4. Or search for a song")
+                    print("\nWaiting for authentication headers to be captured...")
+                    print("(Window will close automatically once detected)\n")
+
+                    # Wait for headers to be captured
+                    max_wait = 90  # 1.5 minutes
+                    waited = 0
+                    while not captured_headers and waited < max_wait:
+                        time.sleep(1)
+                        waited += 1
+
+                        if waited % 15 == 0:
+                            print(f"  Still waiting... ({max_wait - waited}s remaining)")
+                            if request_count > 0:
+                                print(f"  Detected {request_count} total requests ({post_count} POST)")
+                            else:
+                                print(f"  No API requests detected yet - try interacting with the page")
+
+                if not captured_headers:
+                    # Save browser state for future use
+                    if not os.path.exists(user_data_dir):
+                        os.makedirs(user_data_dir)
+                    context.storage_state(path=os.path.join(user_data_dir, 'state.json'))
+
+                    browser.close()
+
+                    print("\n✗ Timeout: Could not capture authentication headers")
+                    print("Please try again and make sure to:")
+                    print("  - Log in to YouTube Music")
+                    print("  - Navigate around the site (Library, playlists, etc.)")
+                    print("\nNote: Your login session has been saved for next time.")
+                    return False
+
+                # Format headers for ytmusicapi (BEFORE closing browser!)
+                print("\nFormatting headers for ytmusicapi...")
+
+                # Get cookies from browser context (ytmusicapi needs these!)
+                print("Extracting cookies from browser context...")
+                cookies = context.cookies('https://music.youtube.com')
+
+                # Format cookies as a Cookie header string
+                cookie_string = '; '.join([f"{c['name']}={c['value']}" for c in cookies])
+                print(f"Found {len(cookies)} cookies")
+
+                # Save browser state for future use
+                if not os.path.exists(user_data_dir):
+                    os.makedirs(user_data_dir)
+                context.storage_state(path=os.path.join(user_data_dir, 'state.json'))
+
+                # NOW close the browser
+                browser.close()
+
+                # ytmusicapi expects specific headers
+                required_headers = {}
+                header_mapping = {
+                    'cookie': 'Cookie',
+                    'authorization': 'Authorization',
+                    'user-agent': 'User-Agent',
+                    'x-goog-authuser': 'X-Goog-AuthUser',
+                    'x-origin': 'X-Origin',
+                    'x-goog-visitor-id': 'X-Goog-Visitor-Id',
+                    'accept': 'Accept',
+                    'accept-language': 'Accept-Language',
+                    'content-type': 'Content-Type',
+                    'origin': 'Origin',
+                    'referer': 'Referer',
+                }
+
+                for key, value in captured_headers.items():
+                    lower_key = key.lower()
+                    if lower_key in header_mapping:
+                        required_headers[header_mapping[lower_key]] = value
+
+                # Add cookies from browser context (critical for ytmusicapi)
+                if cookie_string:
+                    required_headers['Cookie'] = cookie_string
+                    print("✓ Cookies added to headers")
+
+                # Add default headers if missing
+                if 'Accept' not in required_headers:
+                    required_headers['Accept'] = '*/*'
+                if 'Content-Type' not in required_headers:
+                    required_headers['Content-Type'] = 'application/json'
+                if 'User-Agent' not in required_headers:
+                    required_headers['User-Agent'] = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                if 'Origin' not in required_headers:
+                    required_headers['Origin'] = 'https://music.youtube.com'
+                if 'Referer' not in required_headers:
+                    required_headers['Referer'] = 'https://music.youtube.com/'
+
+                # Save to file
+                print(f"Saving headers to {output_file}...")
+                with open(output_file, 'w') as f:
+                    json.dump(required_headers, f, indent=2)
+
+                print(f"\n✓ Authentication headers saved to {output_file}")
+
+                # Verify authentication works
+                print("\nVerifying authentication...")
+                try:
+                    test_ytmusic = YTMusic(output_file)
+                    # Try a simple API call
+                    test_ytmusic.get_library_playlists(limit=1)
+                    print("✓ Authentication verified successfully!")
+
+                    print(f"\n{'='*60}")
+                    print("Setup Complete!")
+                    print(f"{'='*60}")
+                    print(f"You can now use the script to export playlists.")
+                    print(f"Your authentication is saved in: {output_file}\n")
+
+                    return True
+
+                except Exception as e:
+                    print(f"\n✗ Authentication verification failed: {e}")
+                    print("The headers were captured but may not be valid.")
+                    print("Please try running the setup again.")
+                    return False
+
+        except Exception as e:
+            print(f"\n✗ ERROR: {e}")
+            print("\nSetup failed. Please try again or use manual setup:")
+            print("  Run: ytmusicapi browser")
+            return False
 
     def list_user_playlists(self):
         """
@@ -192,6 +458,48 @@ class SpotifyToYouTubeMusic:
 
         except Exception as e:
             print(f"ERROR: Failed to fetch playlists: {e}")
+            sys.exit(1)
+
+    def list_youtube_playlists(self):
+        """
+        List all YouTube Music playlists for the authenticated user.
+        """
+        print(f"\n{'='*60}")
+        print("Your YouTube Music Playlists")
+        print(f"{'='*60}\n")
+
+        try:
+            # Fetch all playlists from YouTube Music
+            playlists = self.ytmusic.get_library_playlists(limit=None)
+
+            if not playlists:
+                print("No playlists found.")
+                return
+
+            print(f"Found {len(playlists)} playlist(s):\n")
+
+            for idx, playlist in enumerate(playlists, 1):
+                name = playlist.get('title', 'Unknown')
+                playlist_id = playlist.get('playlistId', 'Unknown')
+                track_count = playlist.get('count', 0)
+
+                # Handle count being returned as string or int
+                if isinstance(track_count, str):
+                    try:
+                        track_count = int(track_count.replace(',', ''))
+                    except:
+                        track_count = '?'
+
+                print(f"{idx}. {name}")
+                print(f"   ID: {playlist_id}")
+                print(f"   Tracks: {track_count}")
+                print(f"   URL: https://music.youtube.com/playlist?list={playlist_id}")
+                print()
+
+        except Exception as e:
+            print(f"ERROR: Failed to fetch YouTube Music playlists: {e}")
+            print("\nMake sure you're authenticated with YouTube Music.")
+            print("Run 'ytmusicapi oauth' or 'ytmusicapi browser' to set up authentication.")
             sys.exit(1)
 
     def get_spotify_playlist_from_web(self, playlist_url: str) -> Dict:
@@ -502,6 +810,119 @@ class SpotifyToYouTubeMusic:
             print(f"  Warning: Failed to search for track '{track['name']}': {e}")
             return None
 
+    def get_youtube_playlist(self, playlist_id: str) -> Dict:
+        """
+        Fetch an existing YouTube Music playlist and its tracks.
+
+        Args:
+            playlist_id: YouTube Music playlist ID
+
+        Returns:
+            Dictionary containing playlist info and tracks
+        """
+        try:
+            playlist = self.ytmusic.get_playlist(playlist_id, limit=None)
+            return playlist
+        except Exception as e:
+            print(f"ERROR: Failed to fetch YouTube Music playlist: {e}")
+            raise
+
+    def backup_playlist(self, playlist_data: Dict, backup_dir: str = 'backups') -> str:
+        """
+        Backup a YouTube Music playlist to a JSON file.
+
+        Args:
+            playlist_data: Playlist data from get_youtube_playlist
+            backup_dir: Directory to store backups
+
+        Returns:
+            Path to the backup file
+        """
+        try:
+            # Create backup directory if it doesn't exist
+            os.makedirs(backup_dir, exist_ok=True)
+
+            # Generate backup filename with timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            playlist_id = playlist_data.get('id', 'unknown')
+            playlist_name = playlist_data.get('title', 'unknown').replace('/', '_')
+            backup_filename = f"playlist_backup_{playlist_name}_{playlist_id}_{timestamp}.json"
+            backup_path = os.path.join(backup_dir, backup_filename)
+
+            # Save playlist data to file
+            with open(backup_path, 'w', encoding='utf-8') as f:
+                json.dump(playlist_data, f, indent=2, ensure_ascii=False)
+
+            return backup_path
+
+        except Exception as e:
+            print(f"Warning: Failed to create backup: {e}")
+            return None
+
+    def compare_playlists(self, spotify_tracks: List[Dict], youtube_tracks: List[Dict]) -> Tuple[List[Dict], List[str]]:
+        """
+        Compare Spotify and YouTube Music playlists to find differences.
+
+        Args:
+            spotify_tracks: List of tracks from Spotify playlist
+            youtube_tracks: List of tracks from YouTube Music playlist
+
+        Returns:
+            Tuple of (tracks_to_add, items_to_remove)
+            - tracks_to_add: Spotify tracks not in YouTube Music
+            - items_to_remove: YouTube Music setVideoIds to remove
+        """
+        # Create a set of normalized track signatures from YouTube Music
+        # Using (track_name, artist) as the signature
+        youtube_signatures = set()
+        youtube_items_map = {}  # Map signature to setVideoId for removal
+
+        for yt_track in youtube_tracks:
+            if not yt_track:
+                continue
+
+            # Normalize track name
+            track_name = yt_track.get('title', '').lower().strip()
+
+            # Get primary artist
+            artists = yt_track.get('artists', [])
+            artist_name = ''
+            if artists and len(artists) > 0:
+                artist_name = artists[0].get('name', '').lower().strip()
+
+            if track_name and artist_name:
+                signature = (track_name, artist_name)
+                youtube_signatures.add(signature)
+                # Store setVideoId for potential removal
+                if 'setVideoId' in yt_track:
+                    youtube_items_map[signature] = yt_track['setVideoId']
+
+        # Find Spotify tracks not in YouTube Music
+        tracks_to_add = []
+        spotify_signatures = set()
+
+        for sp_track in spotify_tracks:
+            track_name = sp_track['name'].lower().strip()
+            artist_name = sp_track['artists'][0].lower().strip() if sp_track['artists'] else ''
+
+            if track_name and artist_name:
+                signature = (track_name, artist_name)
+                spotify_signatures.add(signature)
+
+                if signature not in youtube_signatures:
+                    tracks_to_add.append(sp_track)
+
+        # Find YouTube Music tracks not in Spotify (to remove)
+        items_to_remove = []
+        for yt_signature, set_video_id in youtube_items_map.items():
+            if yt_signature not in spotify_signatures:
+                items_to_remove.append({
+                    'videoId': None,  # Not needed for removal
+                    'setVideoId': set_video_id
+                })
+
+        return tracks_to_add, items_to_remove
+
     def create_youtube_playlist(self, playlist_name: str, description: str,
                                video_ids: List[str], privacy: str = 'PRIVATE') -> str:
         """
@@ -539,6 +960,129 @@ class SpotifyToYouTubeMusic:
         except Exception as e:
             print(f"ERROR: Failed to create YouTube Music playlist: {e}")
             raise
+
+    def update_playlist(self, spotify_playlist_id: str, youtube_playlist_id: str,
+                       create_backup: bool = True):
+        """
+        Update an existing YouTube Music playlist to match a Spotify playlist.
+
+        Args:
+            spotify_playlist_id: Spotify playlist ID or URL
+            youtube_playlist_id: YouTube Music playlist ID to update
+            create_backup: Whether to backup the playlist before updating
+        """
+        print(f"\n{'='*60}")
+        print("Spotify to YouTube Music Playlist Update")
+        print(f"{'='*60}\n")
+
+        # Fetch current YouTube Music playlist
+        print("Fetching current YouTube Music playlist...")
+        try:
+            youtube_playlist = self.get_youtube_playlist(youtube_playlist_id)
+            yt_track_count = len(youtube_playlist.get('tracks', []))
+            print(f"✓ Found playlist: '{youtube_playlist['title']}' ({yt_track_count} tracks)")
+        except Exception as e:
+            print(f"ERROR: Failed to fetch YouTube Music playlist.")
+            print(f"Make sure the playlist ID is correct and you have access to it.")
+            sys.exit(1)
+
+        # Backup the playlist if requested
+        if create_backup:
+            print("\nBacking up current playlist...")
+            backup_path = self.backup_playlist(youtube_playlist)
+            if backup_path:
+                print(f"✓ Backup saved to: {backup_path}")
+            else:
+                print("Warning: Backup failed, but continuing with update...")
+
+        # Fetch Spotify playlist
+        print("\nFetching Spotify playlist...")
+        try:
+            spotify_playlist = self.get_spotify_playlist(spotify_playlist_id)
+            print(f"✓ Found playlist: '{spotify_playlist['name']}' ({spotify_playlist['total_tracks']} tracks)")
+        except Exception as e:
+            print(f"ERROR: Failed to fetch Spotify playlist: {e}")
+            if create_backup and backup_path:
+                print(f"Your YouTube Music playlist was backed up to: {backup_path}")
+            sys.exit(1)
+
+        # Compare playlists to find differences
+        print("\nComparing playlists...")
+        tracks_to_add, items_to_remove = self.compare_playlists(
+            spotify_playlist['tracks'],
+            youtube_playlist.get('tracks', [])
+        )
+
+        print(f"  Tracks to add: {len(tracks_to_add)}")
+        print(f"  Tracks to remove: {len(items_to_remove)}")
+
+        if not tracks_to_add and not items_to_remove:
+            print("\n✓ Playlists are already in sync! No changes needed.")
+            return
+
+        # Remove tracks that are no longer in Spotify
+        if items_to_remove:
+            print(f"\nRemoving {len(items_to_remove)} tracks from YouTube Music...")
+            try:
+                self.ytmusic.remove_playlist_items(youtube_playlist_id, items_to_remove)
+                print(f"✓ Removed {len(items_to_remove)} tracks")
+            except Exception as e:
+                print(f"ERROR: Failed to remove tracks: {e}")
+                print("Update aborted. Check your backup if needed.")
+                sys.exit(1)
+
+        # Search for and add new tracks
+        if tracks_to_add:
+            print(f"\nSearching for {len(tracks_to_add)} new tracks on YouTube Music...")
+            video_ids = []
+            not_found = []
+
+            for idx, track in enumerate(tracks_to_add, 1):
+                artist_names = ', '.join(track['artists'])
+                print(f"  [{idx}/{len(tracks_to_add)}] {track['name']} - {artist_names}...", end=' ')
+
+                video_id = self.search_youtube_music_track(track)
+
+                if video_id:
+                    video_ids.append(video_id)
+                    print("✓")
+                else:
+                    not_found.append(f"{track['name']} - {artist_names}")
+                    print("✗ Not found")
+
+            # Add the new tracks
+            if video_ids:
+                print(f"\nAdding {len(video_ids)} new tracks to YouTube Music...")
+                try:
+                    batch_size = 50
+                    for i in range(0, len(video_ids), batch_size):
+                        batch = video_ids[i:i + batch_size]
+                        self.ytmusic.add_playlist_items(youtube_playlist_id, batch)
+                        print(f"  Added batch {i//batch_size + 1} ({len(batch)} tracks)")
+                    print(f"✓ Added {len(video_ids)} new tracks")
+                except Exception as e:
+                    print(f"ERROR: Failed to add tracks: {e}")
+                    print("Some tracks may have been removed but not all new tracks were added.")
+                    print(f"Check your backup if needed: {backup_path if create_backup else 'No backup'}")
+                    sys.exit(1)
+
+            if not_found:
+                print(f"\nTracks not found on YouTube Music ({len(not_found)}):")
+                for track in not_found[:10]:
+                    print(f"  - {track}")
+                if len(not_found) > 10:
+                    print(f"  ... and {len(not_found) - 10} more")
+
+        # Summary
+        print(f"\n{'='*60}")
+        print("✓ Update complete!")
+        print(f"{'='*60}")
+        print(f"Playlist: {youtube_playlist['title']}")
+        print(f"Tracks removed: {len(items_to_remove)}")
+        print(f"Tracks added: {len(video_ids) if tracks_to_add else 0}")
+        print(f"Final track count: {yt_track_count - len(items_to_remove) + (len(video_ids) if tracks_to_add else 0)}")
+        if create_backup and backup_path:
+            print(f"Backup: {backup_path}")
 
     def export_playlist(self, spotify_playlist_id: str, privacy: str = 'PRIVATE'):
         """
@@ -609,13 +1153,26 @@ class SpotifyToYouTubeMusic:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Export a Spotify playlist to YouTube Music',
+        description='Export or update a Spotify playlist to YouTube Music',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  %(prog)s --list
+  # Set up YouTube Music authentication (first time)
+  %(prog)s --setup-youtube
+
+  # List your Spotify playlists
+  %(prog)s --list-spotify
+
+  # List your YouTube Music playlists
+  %(prog)s --list-youtube
+
+  # Export a new playlist
   %(prog)s https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M
   %(prog)s 37i9dQZF1DXcBWIGoYBM5M --privacy PUBLIC
+
+  # Update an existing YouTube Music playlist
+  %(prog)s SPOTIFY_ID --update YOUTUBE_MUSIC_PLAYLIST_ID
+  %(prog)s SPOTIFY_ID --update YT_PLAYLIST_ID --no-backup
 
 Environment Variables:
   SPOTIFY_CLIENT_ID      Your Spotify application client ID
@@ -631,34 +1188,72 @@ Environment Variables:
     )
 
     parser.add_argument(
-        '--list',
+        '--list-spotify',
         action='store_true',
         help='List all your Spotify playlists and their IDs'
+    )
+
+    parser.add_argument(
+        '--list-youtube',
+        action='store_true',
+        help='List all your YouTube Music playlists and their IDs'
+    )
+
+    parser.add_argument(
+        '--setup-youtube',
+        action='store_true',
+        help='Automatically set up YouTube Music authentication using browser'
+    )
+
+    parser.add_argument(
+        '--update',
+        metavar='YT_PLAYLIST_ID',
+        help='Update an existing YouTube Music playlist instead of creating a new one'
+    )
+
+    parser.add_argument(
+        '--no-backup',
+        action='store_true',
+        help='Skip backup when updating a playlist (not recommended)'
     )
 
     parser.add_argument(
         '--privacy',
         choices=['PRIVATE', 'PUBLIC', 'UNLISTED'],
         default='PRIVATE',
-        help='YouTube Music playlist privacy setting (default: PRIVATE)'
+        help='YouTube Music playlist privacy setting for new playlists (default: PRIVATE)'
     )
 
     args = parser.parse_args()
 
     try:
+        # Handle setup command separately (doesn't need full initialization)
+        if args.setup_youtube:
+            exporter = SpotifyToYouTubeMusic(skip_youtube_auth=True)
+            exporter.setup_youtube_auth_interactive()
+            sys.exit(0)
+
         exporter = SpotifyToYouTubeMusic()
 
-        if args.list:
+        if args.list_spotify:
             exporter.list_user_playlists()
+        elif args.list_youtube:
+            exporter.list_youtube_playlists()
         elif args.playlist_id:
-            exporter.export_playlist(args.playlist_id, args.privacy)
+            if args.update:
+                # Update existing playlist
+                create_backup = not args.no_backup
+                exporter.update_playlist(args.playlist_id, args.update, create_backup)
+            else:
+                # Export as new playlist
+                exporter.export_playlist(args.playlist_id, args.privacy)
         else:
             parser.print_help()
             print("\nERROR: Please provide a playlist ID or use --list to see your playlists")
             sys.exit(1)
 
     except KeyboardInterrupt:
-        print("\n\nExport cancelled by user.")
+        print("\n\nOperation cancelled by user.")
         sys.exit(0)
     except Exception as e:
         print(f"\nERROR: {e}")

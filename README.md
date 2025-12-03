@@ -5,6 +5,9 @@ A Python script that exports your Spotify playlists to YouTube Music, automatica
 ## Features
 
 - Export any Spotify playlist (public or private) to YouTube Music
+- **Update existing YouTube Music playlists** to match your Spotify playlists
+- Automatic backup before updating (safety net if something goes wrong)
+- Incremental updates: only adds new songs and removes deleted ones
 - Automatic fallback to headless browser scraping if API access fails (works with playlists like "mint", "Top 50", etc.)
 - Uses Playwright to render JavaScript and intercept network requests for reliable data extraction
 - List all your Spotify playlists with the `--list` command
@@ -28,13 +31,15 @@ A Python script that exports your Spotify playlists to YouTube Music, automatica
 python3 -m pip install -r requirements.txt
 ```
 
-After installing Python packages, install Playwright browsers:
+After installing Python packages, install Patchright browsers:
 
 ```bash
-playwright install chromium
+patchright install chromium
 ```
 
-This downloads the Chromium browser that Playwright uses for web scraping when the Spotify API doesn't work.
+This downloads the Chromium browser that Patchright uses for:
+- Web scraping when the Spotify API doesn't work
+- Automated YouTube Music authentication setup
 
 ### 2. Set Up Spotify API Credentials
 
@@ -88,9 +93,26 @@ $env:SPOTIFY_REDIRECT_URI="http://localhost:8888/callback"
 
 ### 3. Set Up YouTube Music Authentication
 
-You have two options for YouTube Music authentication:
+You have three options for YouTube Music authentication:
 
-#### Option A: Browser Headers (Recommended - No Google Cloud Setup Required)
+#### Option A: Automated Setup (Easiest - Recommended)
+
+Simply run:
+
+```bash
+python3 spotify_to_youtube.py --setup-youtube
+```
+
+**What happens:**
+1. Opens a browser window to YouTube Music
+2. You log in to your Google/YouTube account
+3. Script automatically captures authentication headers
+4. Saves to `browser.json` and verifies it works
+5. Done! No manual copying/pasting required
+
+This uses Patchright to avoid bot detection and automatically extract the required authentication headers.
+
+#### Option B: Manual Browser Headers (No Google Cloud Setup Required)
 
 ```bash
 ytmusicapi browser
@@ -104,9 +126,9 @@ Follow the instructions to extract authentication headers from your browser:
 5. Copy the request headers as instructed
 6. Paste them when prompted
 
-This will create a `browser.json` file automatically. **No need to rename it** - the script will auto-detect it.
+This will create a `browser.json` file automatically.
 
-#### Option B: OAuth (Requires Google Cloud Project)
+#### Option C: OAuth (Requires Google Cloud Project)
 
 This method requires setting up a Google Cloud project and enabling the YouTube Data API v3:
 
@@ -120,7 +142,7 @@ ytmusicapi oauth
 ```
 6. Enter your Google OAuth client ID and secret (NOT your Spotify credentials)
 
-This will create an `oauth.json` file automatically. **No need to rename it** - the script will auto-detect it.
+This will create an `oauth.json` file automatically.
 
 **Note**: The script automatically looks for `oauth.json` or `browser.json`. If you want to use a custom filename, specify it in your `config.json`:
 ```json
@@ -135,10 +157,10 @@ This will create an `oauth.json` file automatically. **No need to rename it** - 
 
 ### List Your Playlists
 
-To see all your Spotify playlists and their IDs:
+**List your Spotify playlists:**
 
 ```bash
-python3 spotify_to_youtube.py --list
+python3 spotify_to_youtube.py --list-spotify
 ```
 
 This will display:
@@ -149,7 +171,19 @@ This will display:
 - Privacy status (Public/Private)
 - Direct URL
 
-### Basic Usage
+**List your YouTube Music playlists:**
+
+```bash
+python3 spotify_to_youtube.py --list-youtube
+```
+
+This will display:
+- Playlist name
+- Playlist ID (needed for `--update`)
+- Number of tracks
+- Direct URL
+
+### Create a New Playlist
 
 Export a Spotify playlist (defaults to PRIVATE on YouTube Music):
 
@@ -170,11 +204,44 @@ python3 spotify_to_youtube.py PLAYLIST_ID --privacy PUBLIC
 python3 spotify_to_youtube.py PLAYLIST_ID --privacy UNLISTED
 ```
 
+### Update an Existing Playlist
+
+To update an existing YouTube Music playlist to match your Spotify playlist:
+
+```bash
+python3 spotify_to_youtube.py SPOTIFY_PLAYLIST_ID --update YOUTUBE_MUSIC_PLAYLIST_ID
+```
+
+**How it works:**
+1. Fetches the current YouTube Music playlist
+2. Creates a backup (saved to `backups/` directory with timestamp)
+3. Compares with the Spotify playlist to find differences
+4. Removes songs that are no longer in Spotify
+5. Adds new songs from Spotify that aren't in YouTube Music
+6. Shows a summary of changes
+
+**Skip backup (not recommended):**
+```bash
+python3 spotify_to_youtube.py SPOTIFY_ID --update YT_PLAYLIST_ID --no-backup
+```
+
+**Finding your YouTube Music playlist ID:**
+
+**Method 1: Use the --list-youtube flag (Easiest)**
+```bash
+python3 spotify_to_youtube.py --list-youtube
+```
+
+**Method 2: Manually from YouTube Music**
+1. Open the playlist in YouTube Music
+2. The URL will look like: `https://music.youtube.com/playlist?list=PLxxxxxxxxxxxxxx`
+3. Copy the part after `list=` (e.g., `PLxxxxxxxxxxxxxx`)
+
 ### Finding Your Spotify Playlist ID
 
-**Method 1: Use the --list flag (Easiest)**
+**Method 1: Use the --list-spotify flag (Easiest)**
 ```bash
-python3 spotify_to_youtube.py --list
+python3 spotify_to_youtube.py --list-spotify
 ```
 
 **Method 2: Manually from Spotify**
@@ -186,11 +253,29 @@ python3 spotify_to_youtube.py --list
 
 ## How It Works
 
+### Creating New Playlists
+
 1. **Fetches Spotify Playlist**: Connects to Spotify API and retrieves all tracks from the specified playlist
 2. **Searches YouTube Music**: For each track, searches YouTube Music using the track name and artist
 3. **Matches Songs**: Finds the best match for each track (currently uses the first search result)
 4. **Creates Playlist**: Creates a new playlist on YouTube Music with the same name
 5. **Adds Tracks**: Adds all matched tracks to the new playlist
+
+### Updating Existing Playlists
+
+1. **Fetches Both Playlists**: Gets the current state of both Spotify and YouTube Music playlists
+2. **Creates Backup**: Saves the current YouTube Music playlist to `backups/` directory (unless `--no-backup` is used)
+3. **Compares Playlists**: Intelligently compares track names and artists to find differences
+4. **Removes Old Tracks**: Deletes songs from YouTube Music that are no longer in the Spotify playlist
+5. **Adds New Tracks**: Searches for and adds new songs from Spotify that aren't in YouTube Music yet
+6. **Reports Results**: Shows summary of changes and backup location
+
+**Backup files** are stored in the `backups/` directory with the format:
+```
+playlist_backup_{playlist_name}_{playlist_id}_{timestamp}.json
+```
+
+These backups can be used to restore your playlist if something goes wrong.
 
 ## Troubleshooting
 
