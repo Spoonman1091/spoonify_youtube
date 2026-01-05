@@ -15,6 +15,7 @@ A Python script that exports your Spotify playlists to YouTube Music, automatica
 - Progress tracking with detailed output
 - Configurable playlist privacy settings
 - Reports tracks that couldn't be found
+- **Email status notifications** - Get notified when exports/updates start, complete, or encounter errors
 
 ## Prerequisites
 
@@ -151,6 +152,50 @@ This will create an `oauth.json` file automatically.
     "headers_file": "custom_filename.json"
   }
 }
+```
+
+### 4. Configure Email Notifications (Optional)
+
+To receive email notifications about playlist exports and updates, add email configuration to your `config.json`:
+
+```json
+{
+  "spotify": {
+    "client_id": "your_spotify_client_id_here",
+    "client_secret": "your_spotify_client_secret_here",
+    "redirect_uri": "http://localhost:8888/callback"
+  },
+  "email": {
+    "enabled": true,
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 465,
+    "sender_email": "your_email@gmail.com",
+    "sender_password": "your_app_password_here",
+    "recipient_email": "your_email@gmail.com",
+    "use_tls": true
+  }
+}
+```
+
+**Gmail Users**: For Gmail, you'll need to use an [App Password](https://support.google.com/accounts/answer/185833) instead of your regular password:
+1. Go to your Google Account settings
+2. Enable 2-Step Verification if not already enabled
+3. Go to Security → App passwords
+4. Generate a new app password for "Mail"
+5. Use this password in the `sender_password` field
+
+**Note**: Port 465 (SSL) is recommended for Gmail as it's more reliable than port 587 (STARTTLS) on some networks. If you experience timeout issues, make sure you're using port 465.
+
+**Email Notifications Include:**
+- Export/update start notifications
+- Completion notifications with statistics (tracks found, not found, success rate)
+- Error notifications if something goes wrong
+- Backup file locations
+- List of tracks that couldn't be found
+
+**Disable emails for a single run:**
+```bash
+python3 spotify_to_youtube.py PLAYLIST_ID --no-email
 ```
 
 ## Usage

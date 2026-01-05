@@ -24,14 +24,178 @@ try:
 except ImportError:
     from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 from datetime import datetime
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+
+class EmailNotifier:
+    def __init__(self, config: Dict):
+        """Initialize email notifier with configuration."""
+        self.enabled = config.get('enabled', False)
+        self.smtp_server = config.get('smtp_server', 'smtp.gmail.com')
+        self.smtp_port = config.get('smtp_port', 587)
+        self.sender_email = config.get('sender_email', '')
+        self.sender_password = config.get('sender_password', '')
+        self.recipient_email = config.get('recipient_email', '')
+        self.use_tls = config.get('use_tls', True)
+
+    def send_email(self, subject: str, body: str, is_html: bool = False):
+        """
+        Send an email notification.
+
+        Args:
+            subject: Email subject line
+            body: Email body content
+            is_html: Whether the body is HTML formatted
+        """
+        if not self.enabled:
+            return
+
+        if not all([self.sender_email, self.sender_password, self.recipient_email]):
+            print("Warning: Email is enabled but credentials are missing. Skipping email notification.")
+            return
+
+        try:
+            message = MIMEMultipart('alternative')
+            message['From'] = self.sender_email
+            message['To'] = self.recipient_email
+            message['Subject'] = subject
+
+            if is_html:
+                message.attach(MIMEText(body, 'html'))
+            else:
+                message.attach(MIMEText(body, 'plain'))
+
+            # Support both SMTP with STARTTLS (port 587) and SMTP_SSL (port 465)
+            if self.smtp_port == 465:
+                # Use SMTP_SSL for port 465
+                with smtplib.SMTP_SSL(self.smtp_server, self.smtp_port, timeout=30) as server:
+                    server.login(self.sender_email, self.sender_password)
+                    server.send_message(message)
+            else:
+                # Use SMTP with STARTTLS for port 587
+                with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=30) as server:
+                    if self.use_tls:
+                        server.starttls()
+                    server.login(self.sender_email, self.sender_password)
+                    server.send_message(message)
+
+            print(f"  Email notification sent to {self.recipient_email}")
+
+        except Exception as e:
+            print(f"  Warning: Failed to send email notification: {e}")
+
+    def send_export_complete(self, playlist_name: str, total_tracks: int, found_tracks: int,
+                           added_tracks: List[str], not_found_tracks: List[str], playlist_url: str = None):
+        """Send notification when export completes."""
+        subject = f"Playlist Export Complete: {playlist_name}"
+        success_rate = (found_tracks / total_tracks * 100) if total_tracks > 0 else 0
+
+        body = f"""
+Spotify to YouTube Music Export Complete
+=========================================
+
+Playlist: {playlist_name}
+Total Tracks: {total_tracks}
+Tracks Added: {len(added_tracks)} ({success_rate:.1f}%)
+Tracks Not Found: {len(not_found_tracks)}
+Completed At: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+
+        if playlist_url:
+            body += f"\nPlaylist URL: {playlist_url}\n"
+
+        if added_tracks:
+            body += f"\n{'='*60}\n"
+            body += f"Tracks Added ({len(added_tracks)}):\n"
+            body += f"{'='*60}\n"
+            for track in added_tracks:
+                body += f"  ✓ {track}\n"
+
+        if not_found_tracks:
+            body += f"\n{'='*60}\n"
+            body += f"Tracks Not Found ({len(not_found_tracks)}):\n"
+            body += f"{'='*60}\n"
+            for track in not_found_tracks:
+                body += f"  ✗ {track}\n"
+
+        self.send_email(subject, body)
+
+    def send_update_complete(self, playlist_name: str, added_track_names: List[str],
+                           removed_track_names: List[str], not_found_tracks: List[str],
+                           final_count: int, backup_path: str = None):
+        """Send notification when playlist update completes."""
+        subject = f"Playlist Update Complete: {playlist_name}"
+        body = f"""
+YouTube Music Playlist Update Complete
+=======================================
+
+Playlist: {playlist_name}
+Tracks Added: {len(added_track_names)}
+Tracks Removed: {len(removed_track_names)}
+Tracks Not Found: {len(not_found_tracks)}
+Final Track Count: {final_count}
+Completed At: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+
+        if backup_path:
+            body += f"\nBackup Saved To: {backup_path}\n"
+
+        if added_track_names:
+            body += f"\n{'='*60}\n"
+            body += f"Tracks Added ({len(added_track_names)}):\n"
+            body += f"{'='*60}\n"
+            for track in added_track_names:
+                body += f"  ✓ {track}\n"
+
+        if removed_track_names:
+            body += f"\n{'='*60}\n"
+            body += f"Tracks Removed ({len(removed_track_names)}):\n"
+            body += f"{'='*60}\n"
+            for track in removed_track_names:
+                body += f"  - {track}\n"
+
+        if not_found_tracks:
+            body += f"\n{'='*60}\n"
+            body += f"Tracks Not Found ({len(not_found_tracks)}):\n"
+            body += f"{'='*60}\n"
+            for track in not_found_tracks:
+                body += f"  ✗ {track}\n"
+
+        self.send_email(subject, body)
+
+    def send_error(self, operation: str, error_message: str):
+        """Send notification when an error occurs."""
+        subject = f"Error in {operation}"
+        body = f"""
+Spotify to YouTube Music - Error Occurred
+==========================================
+
+Operation: {operation}
+Error Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+Error Details:
+{error_message}
+
+Please check the logs for more information.
+"""
+        self.send_email(subject, body)
 
 
 class SpotifyToYouTubeMusic:
-    def __init__(self, config_file='config.json', skip_youtube_auth=False):
+    def __init__(self, config_file='config.json', skip_youtube_auth=False, disable_email=False):
         """Initialize the Spotify and YouTube Music clients."""
         self.spotify = None
         self.ytmusic = None
         self.config = self.load_config(config_file)
+
+        # Initialize email notifier
+        email_config = self.config.get('email', {})
+        if disable_email:
+            email_config['enabled'] = False
+        self.email_notifier = EmailNotifier(email_config)
+
         self.setup_spotify()
         if not skip_youtube_auth:
             self.setup_youtube_music()
@@ -859,6 +1023,40 @@ class SpotifyToYouTubeMusic:
             print(f"Warning: Failed to create backup: {e}")
             return None
 
+    def _normalize_for_comparison(self, text: str) -> str:
+        """
+        Normalize text for comparison by removing formatting differences.
+
+        Args:
+            text: Text to normalize
+
+        Returns:
+            Normalized text
+        """
+        if not text:
+            return ''
+
+        # Convert to lowercase and strip whitespace
+        normalized = text.lower().strip()
+
+        # Replace various artist separators with a standard one
+        normalized = normalized.replace(' & ', ', ')
+        normalized = normalized.replace(' and ', ', ')
+
+        # Remove duplicate "feat." patterns like "(feat. X) (feat. X)"
+        import re
+        # Remove parenthetical featuring credits
+        normalized = re.sub(r'\s*\(feat\.?[^)]*\)', '', normalized)
+        normalized = re.sub(r'\s*\[feat\.?[^]]*\]', '', normalized)
+        # Remove "feat." and "ft." variations
+        normalized = re.sub(r'\s+feat\.?\s+.*$', '', normalized)
+        normalized = re.sub(r'\s+ft\.?\s+.*$', '', normalized)
+
+        # Remove extra whitespace
+        normalized = ' '.join(normalized.split())
+
+        return normalized
+
     def compare_playlists(self, spotify_tracks: List[Dict], youtube_tracks: List[Dict]) -> Tuple[List[Dict], List[str]]:
         """
         Compare Spotify and YouTube Music playlists to find differences.
@@ -881,14 +1079,21 @@ class SpotifyToYouTubeMusic:
             if not yt_track:
                 continue
 
-            # Normalize track name
-            track_name = yt_track.get('title', '').lower().strip()
+            # Normalize track name (removes feat./ft. patterns)
+            track_name = self._normalize_for_comparison(yt_track.get('title', ''))
 
-            # Get primary artist
+            # Get ONLY the primary/main artist (first one)
+            # YouTube Music sometimes stores multiple artists as single string: "Artist1 & Artist2"
+            # After normalization, this becomes "artist1, artist2"
+            # We split on comma and take only the first artist name
             artists = yt_track.get('artists', [])
-            artist_name = ''
-            if artists and len(artists) > 0:
-                artist_name = artists[0].get('name', '').lower().strip()
+            if artists:
+                primary_artist = artists[0].get('name', '')
+                normalized = self._normalize_for_comparison(primary_artist)
+                # Split on comma to handle "artist1, artist2" → "artist1"
+                artist_name = normalized.split(',')[0].strip()
+            else:
+                artist_name = ''
 
             if track_name and artist_name:
                 signature = (track_name, artist_name)
@@ -902,8 +1107,17 @@ class SpotifyToYouTubeMusic:
         spotify_signatures = set()
 
         for sp_track in spotify_tracks:
-            track_name = sp_track['name'].lower().strip()
-            artist_name = sp_track['artists'][0].lower().strip() if sp_track['artists'] else ''
+            track_name = self._normalize_for_comparison(sp_track['name'])
+            # Get ONLY the primary/main artist (first one)
+            # Spotify stores artists separately, so artists[0] is just the first artist
+            # We normalize and split on comma to match YouTube's format
+            if sp_track['artists']:
+                primary_artist = sp_track['artists'][0]
+                normalized = self._normalize_for_comparison(primary_artist)
+                # Split on comma to be consistent with YouTube processing
+                artist_name = normalized.split(',')[0].strip()
+            else:
+                artist_name = ''
 
             if track_name and artist_name:
                 signature = (track_name, artist_name)
@@ -975,114 +1189,165 @@ class SpotifyToYouTubeMusic:
         print("Spotify to YouTube Music Playlist Update")
         print(f"{'='*60}\n")
 
-        # Fetch current YouTube Music playlist
-        print("Fetching current YouTube Music playlist...")
+        backup_path = None
+
         try:
-            youtube_playlist = self.get_youtube_playlist(youtube_playlist_id)
-            yt_track_count = len(youtube_playlist.get('tracks', []))
-            print(f"✓ Found playlist: '{youtube_playlist['title']}' ({yt_track_count} tracks)")
-        except Exception as e:
-            print(f"ERROR: Failed to fetch YouTube Music playlist.")
-            print(f"Make sure the playlist ID is correct and you have access to it.")
-            sys.exit(1)
-
-        # Backup the playlist if requested
-        if create_backup:
-            print("\nBacking up current playlist...")
-            backup_path = self.backup_playlist(youtube_playlist)
-            if backup_path:
-                print(f"✓ Backup saved to: {backup_path}")
-            else:
-                print("Warning: Backup failed, but continuing with update...")
-
-        # Fetch Spotify playlist
-        print("\nFetching Spotify playlist...")
-        try:
-            spotify_playlist = self.get_spotify_playlist(spotify_playlist_id)
-            print(f"✓ Found playlist: '{spotify_playlist['name']}' ({spotify_playlist['total_tracks']} tracks)")
-        except Exception as e:
-            print(f"ERROR: Failed to fetch Spotify playlist: {e}")
-            if create_backup and backup_path:
-                print(f"Your YouTube Music playlist was backed up to: {backup_path}")
-            sys.exit(1)
-
-        # Compare playlists to find differences
-        print("\nComparing playlists...")
-        tracks_to_add, items_to_remove = self.compare_playlists(
-            spotify_playlist['tracks'],
-            youtube_playlist.get('tracks', [])
-        )
-
-        print(f"  Tracks to add: {len(tracks_to_add)}")
-        print(f"  Tracks to remove: {len(items_to_remove)}")
-
-        if not tracks_to_add and not items_to_remove:
-            print("\n✓ Playlists are already in sync! No changes needed.")
-            return
-
-        # Remove tracks that are no longer in Spotify
-        if items_to_remove:
-            print(f"\nRemoving {len(items_to_remove)} tracks from YouTube Music...")
+            # Fetch current YouTube Music playlist
+            print("Fetching current YouTube Music playlist...")
             try:
-                self.ytmusic.remove_playlist_items(youtube_playlist_id, items_to_remove)
-                print(f"✓ Removed {len(items_to_remove)} tracks")
+                youtube_playlist = self.get_youtube_playlist(youtube_playlist_id)
+                yt_track_count = len(youtube_playlist.get('tracks', []))
+                print(f"✓ Found playlist: '{youtube_playlist['title']}' ({yt_track_count} tracks)")
             except Exception as e:
-                print(f"ERROR: Failed to remove tracks: {e}")
-                print("Update aborted. Check your backup if needed.")
+                print(f"ERROR: Failed to fetch YouTube Music playlist.")
+                print(f"Make sure the playlist ID is correct and you have access to it.")
+                self.email_notifier.send_error("Playlist Update", f"Failed to fetch YouTube Music playlist: {e}")
                 sys.exit(1)
 
-        # Search for and add new tracks
-        if tracks_to_add:
-            print(f"\nSearching for {len(tracks_to_add)} new tracks on YouTube Music...")
-            video_ids = []
-            not_found = []
-
-            for idx, track in enumerate(tracks_to_add, 1):
-                artist_names = ', '.join(track['artists'])
-                print(f"  [{idx}/{len(tracks_to_add)}] {track['name']} - {artist_names}...", end=' ')
-
-                video_id = self.search_youtube_music_track(track)
-
-                if video_id:
-                    video_ids.append(video_id)
-                    print("✓")
+            # Backup the playlist if requested
+            if create_backup:
+                print("\nBacking up current playlist...")
+                backup_path = self.backup_playlist(youtube_playlist)
+                if backup_path:
+                    print(f"✓ Backup saved to: {backup_path}")
                 else:
-                    not_found.append(f"{track['name']} - {artist_names}")
-                    print("✗ Not found")
+                    print("Warning: Backup failed, but continuing with update...")
 
-            # Add the new tracks
-            if video_ids:
-                print(f"\nAdding {len(video_ids)} new tracks to YouTube Music...")
+            # Fetch Spotify playlist
+            print("\nFetching Spotify playlist...")
+            try:
+                spotify_playlist = self.get_spotify_playlist(spotify_playlist_id)
+                print(f"✓ Found playlist: '{spotify_playlist['name']}' ({spotify_playlist['total_tracks']} tracks)")
+            except Exception as e:
+                print(f"ERROR: Failed to fetch Spotify playlist: {e}")
+                if create_backup and backup_path:
+                    print(f"Your YouTube Music playlist was backed up to: {backup_path}")
+                self.email_notifier.send_error("Playlist Update", f"Failed to fetch Spotify playlist: {e}")
+                sys.exit(1)
+
+            # Compare playlists to find differences
+            print("\nComparing playlists...")
+            tracks_to_add, items_to_remove = self.compare_playlists(
+                spotify_playlist['tracks'],
+                youtube_playlist.get('tracks', [])
+            )
+
+            print(f"  Tracks to add: {len(tracks_to_add)}")
+            print(f"  Tracks to remove: {len(items_to_remove)}")
+
+            if not tracks_to_add and not items_to_remove:
+                print("\n✓ Playlists are already in sync! No changes needed.")
+                return
+
+            # Collect removed track names before removing them
+            removed_track_names = []
+            if items_to_remove:
+                # Map items_to_remove back to track names from YouTube playlist
+                youtube_tracks_dict = {}
+                for yt_track in youtube_playlist.get('tracks', []):
+                    if yt_track and 'setVideoId' in yt_track:
+                        track_name = yt_track.get('title', '')
+                        artists = yt_track.get('artists', [])
+                        # Join all artist names (same as we do for added tracks)
+                        if artists:
+                            artist_names = [a.get('name', '') for a in artists if a.get('name')]
+                            artist_string = ', '.join(artist_names)
+                        else:
+                            artist_string = ''
+                        display_name = f"{track_name} - {artist_string}" if artist_string else track_name
+                        youtube_tracks_dict[yt_track['setVideoId']] = display_name
+
+                for item in items_to_remove:
+                    set_video_id = item.get('setVideoId')
+                    if set_video_id and set_video_id in youtube_tracks_dict:
+                        removed_track_names.append(youtube_tracks_dict[set_video_id])
+
+            # Remove tracks that are no longer in Spotify
+            if items_to_remove:
+                print(f"\nRemoving {len(items_to_remove)} tracks from YouTube Music...")
                 try:
-                    batch_size = 50
-                    for i in range(0, len(video_ids), batch_size):
-                        batch = video_ids[i:i + batch_size]
-                        self.ytmusic.add_playlist_items(youtube_playlist_id, batch)
-                        print(f"  Added batch {i//batch_size + 1} ({len(batch)} tracks)")
-                    print(f"✓ Added {len(video_ids)} new tracks")
+                    self.ytmusic.remove_playlist_items(youtube_playlist_id, items_to_remove)
+                    print(f"✓ Removed {len(items_to_remove)} tracks")
                 except Exception as e:
-                    print(f"ERROR: Failed to add tracks: {e}")
-                    print("Some tracks may have been removed but not all new tracks were added.")
-                    print(f"Check your backup if needed: {backup_path if create_backup else 'No backup'}")
+                    error_msg = f"Failed to remove tracks: {e}"
+                    print(f"ERROR: {error_msg}")
+                    print("Update aborted. Check your backup if needed.")
+                    self.email_notifier.send_error("Playlist Update", error_msg)
                     sys.exit(1)
 
-            if not_found:
-                print(f"\nTracks not found on YouTube Music ({len(not_found)}):")
-                for track in not_found[:10]:
-                    print(f"  - {track}")
-                if len(not_found) > 10:
-                    print(f"  ... and {len(not_found) - 10} more")
+            # Search for and add new tracks
+            video_ids = []
+            added_track_names = []
+            not_found = []
+            if tracks_to_add:
+                print(f"\nSearching for {len(tracks_to_add)} new tracks on YouTube Music...")
 
-        # Summary
-        print(f"\n{'='*60}")
-        print("✓ Update complete!")
-        print(f"{'='*60}")
-        print(f"Playlist: {youtube_playlist['title']}")
-        print(f"Tracks removed: {len(items_to_remove)}")
-        print(f"Tracks added: {len(video_ids) if tracks_to_add else 0}")
-        print(f"Final track count: {yt_track_count - len(items_to_remove) + (len(video_ids) if tracks_to_add else 0)}")
-        if create_backup and backup_path:
-            print(f"Backup: {backup_path}")
+                for idx, track in enumerate(tracks_to_add, 1):
+                    artist_names = ', '.join(track['artists'])
+                    track_display = f"{track['name']} - {artist_names}"
+                    print(f"  [{idx}/{len(tracks_to_add)}] {track_display}...", end=' ')
+
+                    video_id = self.search_youtube_music_track(track)
+
+                    if video_id:
+                        video_ids.append(video_id)
+                        added_track_names.append(track_display)
+                        print("✓")
+                    else:
+                        not_found.append(track_display)
+                        print("✗ Not found")
+
+                # Add the new tracks
+                if video_ids:
+                    print(f"\nAdding {len(video_ids)} new tracks to YouTube Music...")
+                    try:
+                        batch_size = 50
+                        for i in range(0, len(video_ids), batch_size):
+                            batch = video_ids[i:i + batch_size]
+                            self.ytmusic.add_playlist_items(youtube_playlist_id, batch)
+                            print(f"  Added batch {i//batch_size + 1} ({len(batch)} tracks)")
+                        print(f"✓ Added {len(video_ids)} new tracks")
+                    except Exception as e:
+                        error_msg = f"Failed to add tracks: {e}"
+                        print(f"ERROR: {error_msg}")
+                        print("Some tracks may have been removed but not all new tracks were added.")
+                        print(f"Check your backup if needed: {backup_path if create_backup else 'No backup'}")
+                        self.email_notifier.send_error("Playlist Update", error_msg)
+                        sys.exit(1)
+
+                if not_found:
+                    print(f"\nTracks not found on YouTube Music ({len(not_found)}):")
+                    for track in not_found[:10]:
+                        print(f"  - {track}")
+                    if len(not_found) > 10:
+                        print(f"  ... and {len(not_found) - 10} more")
+
+            # Summary
+            final_count = yt_track_count - len(items_to_remove) + len(video_ids)
+            print(f"\n{'='*60}")
+            print("✓ Update complete!")
+            print(f"{'='*60}")
+            print(f"Playlist: {youtube_playlist['title']}")
+            print(f"Tracks removed: {len(items_to_remove)}")
+            print(f"Tracks added: {len(video_ids)}")
+            print(f"Final track count: {final_count}")
+            if create_backup and backup_path:
+                print(f"Backup: {backup_path}")
+
+            # Send update completion notification
+            self.email_notifier.send_update_complete(
+                youtube_playlist['title'],
+                added_track_names,
+                removed_track_names,
+                not_found,
+                final_count,
+                backup_path
+            )
+
+        except Exception as e:
+            # Send error notification for unexpected errors
+            self.email_notifier.send_error("Playlist Update", str(e))
+            raise
 
     def export_playlist(self, spotify_playlist_id: str, privacy: str = 'PRIVATE'):
         """
@@ -1096,59 +1361,90 @@ class SpotifyToYouTubeMusic:
         print("Spotify to YouTube Music Playlist Export")
         print(f"{'='*60}\n")
 
-        # Fetch Spotify playlist
-        print("Fetching Spotify playlist...")
-        playlist = self.get_spotify_playlist(spotify_playlist_id)
-        print(f"✓ Found playlist: '{playlist['name']}' ({playlist['total_tracks']} tracks)")
+        try:
+            # Fetch Spotify playlist
+            print("Fetching Spotify playlist...")
+            playlist = self.get_spotify_playlist(spotify_playlist_id)
+            print(f"✓ Found playlist: '{playlist['name']}' ({playlist['total_tracks']} tracks)")
 
-        # Search for tracks on YouTube Music
-        print(f"\nSearching for tracks on YouTube Music...")
-        video_ids = []
-        not_found = []
+            # Search for tracks on YouTube Music
+            print(f"\nSearching for tracks on YouTube Music...")
+            video_ids = []
+            added_tracks = []
+            not_found = []
 
-        for idx, track in enumerate(playlist['tracks'], 1):
-            artist_names = ', '.join(track['artists'])
-            print(f"  [{idx}/{playlist['total_tracks']}] {track['name']} - {artist_names}...", end=' ')
+            for idx, track in enumerate(playlist['tracks'], 1):
+                artist_names = ', '.join(track['artists'])
+                track_display = f"{track['name']} - {artist_names}"
+                print(f"  [{idx}/{playlist['total_tracks']}] {track_display}...", end=' ')
 
-            video_id = self.search_youtube_music_track(track)
+                video_id = self.search_youtube_music_track(track)
 
-            if video_id:
-                video_ids.append(video_id)
-                print("✓")
+                if video_id:
+                    video_ids.append(video_id)
+                    added_tracks.append(track_display)
+                    print("✓")
+                else:
+                    not_found.append(track_display)
+                    print("✗ Not found")
+
+            print(f"\n✓ Found {len(video_ids)}/{playlist['total_tracks']} tracks on YouTube Music")
+
+            if not_found:
+                print(f"\nTracks not found ({len(not_found)}):")
+                for track in not_found[:10]:  # Show first 10
+                    print(f"  - {track}")
+                if len(not_found) > 10:
+                    print(f"  ... and {len(not_found) - 10} more")
+
+            # Create YouTube Music playlist
+            playlist_url = None
+            if video_ids:
+                print(f"\nCreating YouTube Music playlist...")
+                description = f"Imported from Spotify playlist: {playlist['name']}"
+                if playlist['description']:
+                    description += f"\n\n{playlist['description']}"
+
+                playlist_id = self.create_youtube_playlist(
+                    playlist_name=playlist['name'],
+                    description=description,
+                    video_ids=video_ids,
+                    privacy=privacy
+                )
+
+                playlist_url = f"https://music.youtube.com/playlist?list={playlist_id}"
+
+                print(f"\n{'='*60}")
+                print("✓ Export complete!")
+                print(f"{'='*60}")
+                print(f"Playlist URL: {playlist_url}")
+                print(f"Tracks added: {len(video_ids)}/{playlist['total_tracks']}")
+
+                # Send completion notification
+                self.email_notifier.send_export_complete(
+                    playlist['name'],
+                    playlist['total_tracks'],
+                    len(video_ids),
+                    added_tracks,
+                    not_found,
+                    playlist_url
+                )
             else:
-                not_found.append(f"{track['name']} - {artist_names}")
-                print("✗ Not found")
+                print("\n✗ No tracks were found on YouTube Music. Playlist not created.")
+                # Send completion notification with zero tracks found
+                self.email_notifier.send_export_complete(
+                    playlist['name'],
+                    playlist['total_tracks'],
+                    0,
+                    [],
+                    not_found,
+                    None
+                )
 
-        print(f"\n✓ Found {len(video_ids)}/{playlist['total_tracks']} tracks on YouTube Music")
-
-        if not_found:
-            print(f"\nTracks not found ({len(not_found)}):")
-            for track in not_found[:10]:  # Show first 10
-                print(f"  - {track}")
-            if len(not_found) > 10:
-                print(f"  ... and {len(not_found) - 10} more")
-
-        # Create YouTube Music playlist
-        if video_ids:
-            print(f"\nCreating YouTube Music playlist...")
-            description = f"Imported from Spotify playlist: {playlist['name']}"
-            if playlist['description']:
-                description += f"\n\n{playlist['description']}"
-
-            playlist_id = self.create_youtube_playlist(
-                playlist_name=playlist['name'],
-                description=description,
-                video_ids=video_ids,
-                privacy=privacy
-            )
-
-            print(f"\n{'='*60}")
-            print("✓ Export complete!")
-            print(f"{'='*60}")
-            print(f"Playlist URL: https://music.youtube.com/playlist?list={playlist_id}")
-            print(f"Tracks added: {len(video_ids)}/{playlist['total_tracks']}")
-        else:
-            print("\n✗ No tracks were found on YouTube Music. Playlist not created.")
+        except Exception as e:
+            # Send error notification
+            self.email_notifier.send_error("Playlist Export", str(e))
+            raise
 
 
 def main():
@@ -1224,16 +1520,22 @@ Environment Variables:
         help='YouTube Music playlist privacy setting for new playlists (default: PRIVATE)'
     )
 
+    parser.add_argument(
+        '--no-email',
+        action='store_true',
+        help='Disable email notifications for this run (even if enabled in config)'
+    )
+
     args = parser.parse_args()
 
     try:
         # Handle setup command separately (doesn't need full initialization)
         if args.setup_youtube:
-            exporter = SpotifyToYouTubeMusic(skip_youtube_auth=True)
+            exporter = SpotifyToYouTubeMusic(skip_youtube_auth=True, disable_email=args.no_email)
             exporter.setup_youtube_auth_interactive()
             sys.exit(0)
 
-        exporter = SpotifyToYouTubeMusic()
+        exporter = SpotifyToYouTubeMusic(disable_email=args.no_email)
 
         if args.list_spotify:
             exporter.list_user_playlists()

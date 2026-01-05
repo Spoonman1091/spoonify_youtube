@@ -3,5 +3,14 @@
     "client_id": "your_spotify_client_id_here",
     "client_secret": "your_spotify_client_secret_here",
     "redirect_uri": "http://127.0.0.1:8888/callback"
+  },
+  "email": {
+    "enabled": false,
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 465,
+    "sender_email": "your_email@gmail.com",
+    "sender_password": "your_app_password_here",
+    "recipient_email": "your_email@gmail.com",
+    "use_tls": true
   }
 }
