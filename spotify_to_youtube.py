@@ -13,6 +13,10 @@ import sys
 import json
 import re
 import time
+
+# Get the directory where this script is located (for running from any directory)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from ytmusicapi import YTMusic
@@ -188,6 +192,9 @@ class SpotifyToYouTubeMusic:
         """Initialize the Spotify and YouTube Music clients."""
         self.spotify = None
         self.ytmusic = None
+        # Resolve config file path relative to script directory
+        if not os.path.isabs(config_file):
+            config_file = os.path.join(SCRIPT_DIR, config_file)
         self.config = self.load_config(config_file)
 
         # Initialize email notifier
@@ -286,13 +293,17 @@ class SpotifyToYouTubeMusic:
 
         # If a specific file is configured, use only that
         if configured_file:
+            # Resolve relative paths to script directory
+            if not os.path.isabs(configured_file):
+                configured_file = os.path.join(SCRIPT_DIR, configured_file)
             if os.path.exists(configured_file):
                 headers_file = configured_file
         else:
-            # Otherwise check default files
+            # Otherwise check default files in script directory
             for file in default_files:
-                if os.path.exists(file):
-                    headers_file = file
+                file_path = os.path.join(SCRIPT_DIR, file)
+                if os.path.exists(file_path):
+                    headers_file = file_path
                     break
 
         if not headers_file:
@@ -327,6 +338,10 @@ class SpotifyToYouTubeMusic:
         Args:
             output_file: Path to save the authentication headers
         """
+        # Resolve output file path relative to script directory
+        if not os.path.isabs(output_file):
+            output_file = os.path.join(SCRIPT_DIR, output_file)
+
         print(f"\n{'='*60}")
         print("YouTube Music Authentication Setup")
         print(f"{'='*60}\n")
@@ -337,7 +352,7 @@ class SpotifyToYouTubeMusic:
         input()
 
         captured_headers = None
-        user_data_dir = os.path.join(os.getcwd(), '.browser_profile')
+        user_data_dir = os.path.join(SCRIPT_DIR, '.browser_profile')
 
         try:
             with sync_playwright() as p:
@@ -1003,6 +1018,9 @@ class SpotifyToYouTubeMusic:
             Path to the backup file
         """
         try:
+            # Resolve backup directory relative to script directory
+            if not os.path.isabs(backup_dir):
+                backup_dir = os.path.join(SCRIPT_DIR, backup_dir)
             # Create backup directory if it doesn't exist
             os.makedirs(backup_dir, exist_ok=True)
 
