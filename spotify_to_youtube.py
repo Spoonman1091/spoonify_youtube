@@ -1041,43 +1041,54 @@ class SpotifyToYouTubeMusic:
             print(f"Warning: Failed to create backup: {e}")
             return None
 
-    def _normalize_for_comparison(self, text: str) -> str:
+    def _extract_base_song_name(self, text: str) -> str:
         """
-        Normalize text for comparison by removing formatting differences.
+        Extract the base song name by taking text up to the first separator.
+
+        This handles the common pattern where Spotify and YouTube Music format
+        remixes/versions differently:
+        - Spotify: "Song Name - Remix Info" or "Song Name (Remix Info)"
+        - YouTube: "Song Name (Remix Info)" or "Song Name - Remix Info"
+
+        By extracting just the base name, we can match tracks regardless of
+        how the remix/version info is formatted.
 
         Args:
-            text: Text to normalize
+            text: Full track name
 
         Returns:
-            Normalized text
+            Base song name (lowercase, trimmed)
         """
         if not text:
             return ''
 
-        # Convert to lowercase and strip whitespace
-        normalized = text.lower().strip()
+        # Find the first occurrence of ' - ' or '('
+        # We look for ' - ' (with spaces) to avoid splitting on hyphenated words
+        dash_pos = text.find(' - ')
+        paren_pos = text.find('(')
 
-        # Replace various artist separators with a standard one
-        normalized = normalized.replace(' & ', ', ')
-        normalized = normalized.replace(' and ', ', ')
+        # Find the earliest separator
+        positions = []
+        if dash_pos != -1:
+            positions.append(dash_pos)
+        if paren_pos != -1:
+            positions.append(paren_pos)
 
-        # Remove duplicate "feat." patterns like "(feat. X) (feat. X)"
-        import re
-        # Remove parenthetical featuring credits
-        normalized = re.sub(r'\s*\(feat\.?[^)]*\)', '', normalized)
-        normalized = re.sub(r'\s*\[feat\.?[^]]*\]', '', normalized)
-        # Remove "feat." and "ft." variations
-        normalized = re.sub(r'\s+feat\.?\s+.*$', '', normalized)
-        normalized = re.sub(r'\s+ft\.?\s+.*$', '', normalized)
+        if positions:
+            split_pos = min(positions)
+            text = text[:split_pos]
 
-        # Remove extra whitespace
-        normalized = ' '.join(normalized.split())
-
-        return normalized
+        # Normalize: lowercase, strip whitespace
+        return text.lower().strip()
 
     def compare_playlists(self, spotify_tracks: List[Dict], youtube_tracks: List[Dict]) -> Tuple[List[Dict], List[str]]:
         """
         Compare Spotify and YouTube Music playlists to find differences.
+
+        Comparison is done using only the base song name (up to the first
+        separator like '-' or '('), ignoring artist names. This handles
+        the common case where Spotify and YouTube Music format track names
+        differently (e.g., "Song - Remix" vs "Song (Remix)").
 
         Args:
             spotify_tracks: List of tracks from Spotify playlist
@@ -1088,8 +1099,8 @@ class SpotifyToYouTubeMusic:
             - tracks_to_add: Spotify tracks not in YouTube Music
             - items_to_remove: YouTube Music setVideoIds to remove
         """
-        # Create a set of normalized track signatures from YouTube Music
-        # Using (track_name, artist) as the signature
+        # Create a set of base song names from YouTube Music
+        # Using only the base song name (before first separator) as the signature
         youtube_signatures = set()
         youtube_items_map = {}  # Map signature to setVideoId for removal
 
@@ -1097,57 +1108,33 @@ class SpotifyToYouTubeMusic:
             if not yt_track:
                 continue
 
-            # Normalize track name (removes feat./ft. patterns)
-            track_name = self._normalize_for_comparison(yt_track.get('title', ''))
+            # Extract base song name (up to first '-' or '(')
+            base_name = self._extract_base_song_name(yt_track.get('title', ''))
 
-            # Get ONLY the primary/main artist (first one)
-            # YouTube Music sometimes stores multiple artists as single string: "Artist1 & Artist2"
-            # After normalization, this becomes "artist1, artist2"
-            # We split on comma and take only the first artist name
-            artists = yt_track.get('artists', [])
-            if artists:
-                primary_artist = artists[0].get('name', '')
-                normalized = self._normalize_for_comparison(primary_artist)
-                # Split on comma to handle "artist1, artist2" → "artist1"
-                artist_name = normalized.split(',')[0].strip()
-            else:
-                artist_name = ''
-
-            if track_name and artist_name:
-                signature = (track_name, artist_name)
-                youtube_signatures.add(signature)
+            if base_name:
+                youtube_signatures.add(base_name)
                 # Store setVideoId for potential removal
                 if 'setVideoId' in yt_track:
-                    youtube_items_map[signature] = yt_track['setVideoId']
+                    youtube_items_map[base_name] = yt_track['setVideoId']
 
         # Find Spotify tracks not in YouTube Music
         tracks_to_add = []
         spotify_signatures = set()
 
         for sp_track in spotify_tracks:
-            track_name = self._normalize_for_comparison(sp_track['name'])
-            # Get ONLY the primary/main artist (first one)
-            # Spotify stores artists separately, so artists[0] is just the first artist
-            # We normalize and split on comma to match YouTube's format
-            if sp_track['artists']:
-                primary_artist = sp_track['artists'][0]
-                normalized = self._normalize_for_comparison(primary_artist)
-                # Split on comma to be consistent with YouTube processing
-                artist_name = normalized.split(',')[0].strip()
-            else:
-                artist_name = ''
+            # Extract base song name (up to first '-' or '(')
+            base_name = self._extract_base_song_name(sp_track['name'])
 
-            if track_name and artist_name:
-                signature = (track_name, artist_name)
-                spotify_signatures.add(signature)
+            if base_name:
+                spotify_signatures.add(base_name)
 
-                if signature not in youtube_signatures:
+                if base_name not in youtube_signatures:
                     tracks_to_add.append(sp_track)
 
         # Find YouTube Music tracks not in Spotify (to remove)
         items_to_remove = []
-        for yt_signature, set_video_id in youtube_items_map.items():
-            if yt_signature not in spotify_signatures:
+        for yt_base_name, set_video_id in youtube_items_map.items():
+            if yt_base_name not in spotify_signatures:
                 items_to_remove.append({
                     'videoId': None,  # Not needed for removal
                     'setVideoId': set_video_id
