@@ -964,11 +964,13 @@ class SpotifyToYouTubeMusic:
         """
         Search for a track on YouTube Music.
 
+        Skips results where the user has previously disliked (downvoted) the song.
+
         Args:
             track: Dictionary containing track info (name, artists, etc.)
 
         Returns:
-            YouTube Music video ID if found, None otherwise
+            YouTube Music video ID if found and not disliked, None otherwise
         """
         try:
             # Create search query
@@ -981,9 +983,15 @@ class SpotifyToYouTubeMusic:
             if not search_results:
                 return None
 
-            # Return the first result's video ID
-            # TODO: Could implement more sophisticated matching based on duration, etc.
-            return search_results[0]['videoId']
+            # Return the first result that hasn't been downvoted
+            for result in search_results:
+                if result.get('likeStatus') == 'DISLIKE':
+                    print(f"  (skipping disliked result: {result.get('title', 'unknown')})", end=' ')
+                    continue
+                return result['videoId']
+
+            # All results were disliked
+            return None
 
         except Exception as e:
             print(f"  Warning: Failed to search for track '{track['name']}': {e}")
